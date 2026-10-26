@@ -28,3 +28,12 @@ synthetic_dataset_cropped_aligned/
 .vscode/
 .idea/
 .git_history_backup_*
+
+# Web demo (app/, tests, end-to-end run)
+.venv-rf/
+tests/fixtures/.cache/
+*.y4m
+e2e-artifacts/
+node_modules/
+.pytest_cache/
+.cache/
