@@ -15,6 +15,7 @@ from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
+from starlette.formparsers import MultiPartParser
 
 from app import __version__
 from app.config import Settings
@@ -31,10 +32,27 @@ def _static_dir(settings: Settings) -> Path:
     return Path(settings.static_dir).expanduser() if settings.static_dir else DEFAULT_STATIC_DIR
 
 
+def keep_uploads_in_memory(max_upload_bytes: int) -> None:
+    """Make sure an accepted frame never touches the disk.
+
+    Starlette parses multipart file parts into a ``SpooledTemporaryFile`` that
+    rolls over to a real temporary file above 1 MB.  Raising that threshold past
+    the upload limit keeps every accepted frame in memory, which is what the
+    privacy note promises (the limit itself is enforced in ``/api/analyze``).
+    The attribute is ``spool_max_size`` in current Starlette and ``max_file_size``
+    in older releases; both are process-wide class attributes.
+    """
+    for attr in ("spool_max_size", "max_file_size"):
+        current = getattr(MultiPartParser, attr, None)
+        if isinstance(current, int) and current <= max_upload_bytes:
+            setattr(MultiPartParser, attr, max_upload_bytes + 1)
+
+
 def create_app(settings: Optional[Settings] = None) -> FastAPI:
     """Build the application.  Models and the detector load in the lifespan."""
     settings = settings if settings is not None else Settings.from_env()
     static_dir = _static_dir(settings)
+    keep_uploads_in_memory(settings.max_upload_bytes)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):

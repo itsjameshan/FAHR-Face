@@ -161,6 +161,46 @@ def test_oversized_upload_gives_413(client):
     assert "detail" in r.json()
 
 
+def test_uploads_within_the_limit_never_touch_the_disk(monkeypatch):
+    """Starlette spools multipart files above 1 MB to disk unless the threshold is raised."""
+    import tempfile
+
+    from fastapi.testclient import TestClient
+    from starlette.formparsers import MultiPartParser
+
+    from app.config import Settings
+    from app.server import create_app
+
+    limit = 3_000_000
+    settings = Settings(
+        allow_random_weights=False,
+        age_checkpoint="/nonexistent/age.pth",
+        survival_checkpoint="/nonexistent/surv.pth",
+        max_upload_bytes=limit,
+        device="cpu",
+    )
+
+    rollovers = []
+
+    def spy_rollover(self):
+        rollovers.append(self._max_size)
+        return original_rollover(self)
+
+    original_rollover = tempfile.SpooledTemporaryFile.rollover
+    monkeypatch.setattr(tempfile.SpooledTemporaryFile, "rollover", spy_rollover)
+
+    with TestClient(create_app(settings)) as c:
+        assert MultiPartParser.spool_max_size > limit
+        # A 1.5 MB JPEG: above Starlette's default 1 MB spool size, below our limit.
+        noise = np.random.default_rng(0).integers(0, 256, size=(1200, 1600, 3), dtype=np.uint8)
+        data = _jpeg_bytes(noise, quality=95)
+        assert 1_048_576 < len(data) <= limit
+        r = _post(c, data)
+        assert r.status_code == 200
+        assert r.json()["image"] == {"width": 1600, "height": 1200}
+    assert rollovers == []
+
+
 def test_include_crops_returns_data_urls(client):
     data = require_fixture("obama.jpg").read_bytes()
     body = _post(client, data, include_crops="true").json()
