@@ -237,6 +237,64 @@ def test_missing_image_field_is_rejected(client):
     assert r.status_code == 422
 
 
+# ------------------------------------------------------ survival checkpoint
+
+
+def test_survival_checkpoint_enables_risk_scores(tmp_path):
+    """With fahr_facesurvival.pth on disk (here: the real architecture with random weights),
+    /api/health reports the survival model ready and /api/analyze returns a risk score per face."""
+    torch = pytest.importorskip("torch")
+    from fastapi.testclient import TestClient
+    from transformers import ViTConfig
+
+    from app.config import Settings
+    from app.server import create_app
+    from ViTForSurvivalAnalysis import ViTForSurvivalAnalysis
+
+    torch.manual_seed(0)
+    model = ViTForSurvivalAnalysis(
+        ViTConfig(num_labels=1, image_size=112, num_hidden_layers=12, num_attention_heads=12)
+    )
+    ckpt = tmp_path / "fahr_facesurvival.pth"
+    torch.save({"model_state_dict": model.state_dict(), "epoch": 0}, ckpt)
+
+    settings = Settings(
+        allow_random_weights=True,
+        age_checkpoint="/nonexistent/age.pth",
+        survival_checkpoint=str(ckpt),
+        device="cpu",
+    )
+    with TestClient(create_app(settings)) as c:
+        health = c.get("/api/health").json()
+        assert health["models"]["survival"] == {
+            "available": True,
+            "weights": "checkpoint",
+            "checkpoint": str(ckpt),
+            "error": None,
+        }
+
+        body = _post(c, require_fixture("two_people.jpg").read_bytes()).json()
+        assert len(body["faces"]) == 2
+        for face in body["faces"]:
+            assert isinstance(face["risk_score"], float) and math.isfinite(face["risk_score"])
+        # Different faces get different scores (almost surely, even with random weights).
+        assert body["faces"][0]["risk_score"] != body["faces"][1]["risk_score"]
+        assert body["models"]["survival"] == {"available": True, "weights": "checkpoint", "reason": None}
+        assert not any("survival" in w.lower() for w in body["warnings"])
+
+        # Without the checkpoint the same request reports null risk scores.
+    settings_without = Settings(
+        allow_random_weights=True,
+        age_checkpoint="/nonexistent/age.pth",
+        survival_checkpoint=str(tmp_path / "missing.pth"),
+        device="cpu",
+    )
+    with TestClient(create_app(settings_without)) as c:
+        body = _post(c, require_fixture("two_people.jpg").read_bytes()).json()
+        assert [f["risk_score"] for f in body["faces"]] == [None, None]
+        assert body["models"]["survival"]["available"] is False
+
+
 # --------------------------------------------------------- degraded startup
 
 
