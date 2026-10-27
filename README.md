@@ -20,6 +20,26 @@ FAHR-Face/
 ├── ViTForAgeEstimation.py        # Age estimation model architecture
 ├── ViTForSurvivalAnalysis.py     # Survival analysis model architecture
 ├── facefoundation.yml            # Miniforge environment configuration
+├── requirements-app.txt          # Dependencies of the live webcam demo (CPU PyTorch, no TensorFlow)
+├── app/                          # Live webcam demo: local FastAPI server, run with `python -m app`
+│   ├── __main__.py               # Entry point; configured through FAHR_* environment variables
+│   ├── config.py                 # Settings read from the environment
+│   ├── align.py                  # Face alignment and crop geometry ported from retina-face 0.0.17
+│   ├── detectors/                # Face detectors: OpenCV YuNet (default), optional RetinaFace
+│   ├── models.py                 # Loads FAHR-FaceAge / FAHR-FaceSurvival and runs inference
+│   ├── pipeline.py               # detect -> align -> crop -> predict -> JSON
+│   ├── server.py                 # HTTP API: GET /, GET /api/health, POST /api/analyze
+│   └── static/                   # Browser UI (vanilla JavaScript, no build step)
+│       ├── index.html
+│       ├── app.js
+│       └── styles.css
+├── scripts/
+│   ├── download_checkpoints.sh   # Downloads the released checkpoints into checkpoints/ (resumable)
+│   ├── run_app.sh                # Creates .venv, installs requirements-app.txt, starts the demo
+│   └── e2e_fake_camera.mjs       # Playwright end-to-end check with a fake webcam
+├── tests/                        # pytest suite for the demo (alignment, detector, models, API)
+├── docs/
+│   └── superpowers/specs/        # Design spec of the webcam demo
 ├── training/
 │   ├── training_fahr_face/       # Training code for the foundation model
 │   │   └── run.py                # Script to train the FAHR-Face foundation model
@@ -135,6 +155,97 @@ python run_finetuning.py
 cd training/train_fahr_facesurvival
 python run.py
 ```
+
+## Live webcam demo (web UI)
+
+A small local web app in [`app/`](app/) puts FAHR-FaceAge behind a webcam. Your browser streams frames to a server running on your own machine; the server detects the faces, preprocesses each one the way the paper did (detect → eye-based alignment → crop → 112 × 112 → normalization) and returns the **predicted face age**, which is drawn live over the video. **FAHR-FaceSurvival relative risk is shown only if you have `checkpoints/fahr_facesurvival.pth`**; otherwise the UI marks it as *not available*, because those weights are not publicly released. It is a research demo for a laptop: no TensorFlow, no GPU required, no build step, no external scripts.
+
+### Quick start
+
+1. Download the released age checkpoint into `checkpoints/` (resumable; add `--with-foundation` to also fetch `fahr_face.pth`):
+```bash
+bash scripts/download_checkpoints.sh
+```
+
+2. Create `.venv`, install `requirements-app.txt` and start the server:
+```bash
+bash scripts/run_app.sh
+```
+
+3. Open http://localhost:8000, read the consent note and allow camera access.
+
+The manual equivalent, in any Python 3.10+ environment:
+
+```bash
+pip install -r requirements-app.txt
+python -m app
+```
+
+`run_app.sh` installs the CPU-only PyTorch wheels on Linux (set `FAHR_GPU=1` for the default CUDA wheels), passes every `FAHR_*` variable through to the server and accepts `--skip-install` to start without touching pip. The server has no command-line flags; it is configured entirely through the environment variables listed under [Configuration](#configuration).
+
+### What you see
+
+- Boxes around the detected faces on the live video, optionally with the five landmarks, and a label such as `Age 42 · Risk n/a`.
+- One card per face in the side panel with the smoothed age, the **relative risk score (uncalibrated)** or *not available* with the reason, the detection confidence and the 112 × 112 aligned crop ("what the model sees").
+- Status chips for the detector, the device, the age model (ready / random weights / missing) and the survival model (ready / not available), plus banners for a missing checkpoint (with the download command), random weights, insecure context and camera errors.
+- Three modes: **Continuous** (one request per frame; the next frame is sent when the previous answer arrives), **Snapshot** (freeze and analyze a single frame) and **Upload image** (analyze a photo, no camera needed). Mirror and landmark toggles.
+
+### Face detection
+
+The default detector is OpenCV's **YuNet** (`cv2.FaceDetectorYN`): a single ~230 KB ONNX model, downloaded once from the [OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) into `~/.cache/fahr-face` (checksum verified), fast enough for live video on a CPU. The crop and alignment geometry applied to each detection is ported from `retina-face` 0.0.17, the package used by [`other/face_crop_align.py`](other/face_crop_align.py), so the age model sees the same kind of crop as during training. `FAHR_DETECTOR=retinaface` switches to the original RetinaFace package if it is installed (`pip install retina-face`; this pulls in TensorFlow). YuNet boxes can differ slightly from RetinaFace boxes, which may shift estimated ages by a few years; the active detector is always shown in the header.
+
+### Configuration
+
+All settings are environment variables. Relative paths are resolved from the directory you start the server in (the repository root when using `run_app.sh`).
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `FAHR_AGE_CHECKPOINT` | `checkpoints/fahr_faceage.pth` | FAHR-FaceAge checkpoint. |
+| `FAHR_SURVIVAL_CHECKPOINT` | `checkpoints/fahr_facesurvival.pth` | FAHR-FaceSurvival checkpoint (optional; not distributed). |
+| `FAHR_DETECTOR` | `auto` | `auto` / `yunet` / `retinaface` (`auto` selects YuNet). |
+| `FAHR_DETECTION_THRESHOLD` | detector default (YuNet: `0.7`) | Minimum detection score. |
+| `FAHR_DEVICE` | `auto` | `auto` / `cpu` / `cuda` / `mps` (`auto` prefers CUDA, then MPS, then CPU). |
+| `FAHR_ALLOW_RANDOM_WEIGHTS` | `0` | Development and tests only: random initialization when a checkpoint is missing. Output is meaningless and every response carries a warning. |
+| `FAHR_MAX_FACES` | `5` | Faces analyzed per frame. |
+| `FAHR_MAX_UPLOAD_BYTES` | `8388608` | Upload limit (8 MB). |
+| `FAHR_MODEL_CACHE_DIR` | `~/.cache/fahr-face` | Where the YuNet model is cached. |
+| `FAHR_YUNET_MODEL` | (unset) | Use this YuNet ONNX file instead of downloading one. |
+| `FAHR_HOST` / `FAHR_PORT` | `127.0.0.1` / `8000` | Bind address and port. |
+
+Example: `FAHR_PORT=8080 FAHR_DEVICE=cpu python -m app`
+
+### Privacy and ethics
+
+- Frames are sent only to the server you started, on your own machine (`127.0.0.1` by default). They are processed in memory and discarded; nothing about faces is written to disk or logged, and API responses carry `Cache-Control: no-store`. The page states this in a consent note before the camera starts.
+- The demo detects and analyzes faces; it does not identify people, and it stores nothing.
+- Like the rest of this repository, the demo is intended for academic research (see [Ethical Use](#ethical-use)). It is not a medical device and provides no medical advice. The survival output, when available, is an uncalibrated relative risk score from a research model, not a probability.
+
+### Troubleshooting
+
+- **Camera blocked or no permission prompt** – allow the camera for this site in the browser's permission settings (the camera icon in the address bar), then press *Start camera* again. Another application may also be holding the camera.
+- **"Insecure context" banner** – browsers expose the camera only on `localhost` / `127.0.0.1` or over HTTPS. If the server runs on another machine (`FAHR_HOST=0.0.0.0`), reach it through an SSH tunnel (`ssh -L 8000:localhost:8000 <host>`) or put HTTPS in front of it. Upload mode works regardless.
+- **Slow or choppy** – CPU inference takes a few hundred milliseconds per frame. The page already downsizes frames to at most 640 px wide and never sends the next frame before the previous answer arrives. Lower `FAHR_MAX_FACES`, or set `FAHR_DEVICE=cuda` / `mps` if you have a GPU.
+- **"Random weights" banner** – a checkpoint is missing and the server was started with `FAHR_ALLOW_RANDOM_WEIGHTS=1`. The numbers are meaningless: download the checkpoint and restart without that variable.
+- **Age model shown as missing** – no file at `FAHR_AGE_CHECKPOINT`; run `bash scripts/download_checkpoints.sh` and restart the server.
+- **Survival shown as not available** – expected unless you have `checkpoints/fahr_facesurvival.pth`; the weights are not publicly released.
+- **Detector error (HTTP 503)** – the YuNet model could not be downloaded. Fetch [`face_detection_yunet_2023mar.onnx`](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) manually into `~/.cache/fahr-face/`, or point `FAHR_YUNET_MODEL` at it.
+
+### Tests
+
+```bash
+pip install pytest httpx   # test-only extras
+python -m pytest -q
+```
+
+The suite covers the alignment port (compared with the vendored retina-face functions), the YuNet detector (public test photos are downloaded into `tests/fixtures/.cache/`; skipped offline), model loading with random weights and the HTTP API. One additional fidelity test runs only if `retina-face` is installed.
+
+An end-to-end check drives the real page in Chromium with a fake webcam. Start the server first (with `FAHR_ALLOW_RANDOM_WEIGHTS=1` if you have no checkpoint), then run:
+
+```bash
+node scripts/e2e_fake_camera.mjs --video <file.y4m>
+```
+
+It needs Node 18+, [Playwright](https://playwright.dev) with Chromium (`npm install -g playwright && npx playwright install chromium`) and ffmpeg (only when `<file.y4m>` does not exist yet; it is then built from a test portrait). The script accepts the consent note, waits for a face card with an age, exercises Snapshot mode, saves a screenshot to `e2e-artifacts/webcam.png` and prints one JSON line.
 
 ## Dataset Information
 

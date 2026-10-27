@@ -1,0 +1,14 @@
+# FAHR-Face Live webcam demo (python -m app).
+# CPU-only torch is enough: pip install -r requirements-app.txt
+# (for a smaller CPU wheel: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu)
+# No TensorFlow: face detection uses OpenCV's YuNet. The original retina-face
+# detector is optional (pip install retina-face) and selected with FAHR_DETECTOR=retinaface.
+torch>=2.2
+torchvision>=0.17
+transformers>=4.40
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+pillow>=10
+opencv-python-headless>=4.8
+numpy>=1.24
